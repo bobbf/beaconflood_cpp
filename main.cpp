@@ -2,15 +2,19 @@
 #include <unistd.h>
 #include <map>
 #include <thread>
-
+#include <sstream>
+#include <iomanip>
+#include <mutex>
 #include <tins/tins.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 using namespace std;
 using namespace Tins;
 
 void send_Beacon();
 void send_probeResp(string srcaddr, string desaddr, string ssid);
-
+void recv_Msg();
 void recv_Packet();
 
 int isResponse(const Dot11ProbeRequest &proveReq);
@@ -18,6 +22,7 @@ int isResponse(const Dot11ProbeRequest &proveReq);
 inline int DS_status(const Dot11 &dot11) { return dot11.from_ds() * 2 + dot11.to_ds(); }
 
 void listSSID_initialize(const char *filename);
+void listSSID_initialize(string msgs);
 string mac_generate(string oui);
 
 inline string toHexStream(int num) {
@@ -34,10 +39,12 @@ map<string, string> listSSID = {};
 
 #define	ISRESP_BROADCAST 1
 #define ISRESP_UNICAST  2
+#define BUFSIZE 512
 
 std::string interface = "";
 
 int generate_num = 0;
+mutex m;
 
 int main(int argc, char *argv[])
 {
@@ -50,19 +57,55 @@ int main(int argc, char *argv[])
     listSSID_initialize(argv[2]);
 
     clog << "== SSID list ==" << endl;
-
+    m.lock();
     for (auto it = listSSID.begin(); it!=listSSID.end(); ++it) {
         clog << it->first << "  " << it->second << endl;
     }
+    m.unlock();
 
     /* Thread for send beacon */
     thread beaconThread(&send_Beacon);
+    thread udp_Msg(recv_Msg);
 
     /* Thread for recv packet & send probeResp */
     //thread recvThread(&recv_Packet);      temporarily annotation for reduce overhead
 
     beaconThread.join();
+    udp_Msg.join();
     //recvThread.join();
+}
+
+void recv_Msg() {
+    int sock = socket(AF_INET,SOCK_DGRAM,0);
+    int retval;
+
+    sockaddr_in serveraddr;
+    bzero(&serveraddr, sizeof(serveraddr));
+    serveraddr.sin_family=AF_INET;
+    serveraddr.sin_port=htons(1234);
+    serveraddr.sin_addr.s_addr=htonl(INADDR_ANY);
+    retval=bind(sock, (sockaddr*)&serveraddr, sizeof(serveraddr));
+
+    sockaddr_in clientaddr;
+    int addrlen;
+    char buf[BUFSIZE+1];
+
+    while(1)
+    {
+        // 데이터 받기
+        addrlen=sizeof(clientaddr);
+        retval=recvfrom(sock,buf,BUFSIZE,0,(sockaddr*)&clientaddr,
+                        (socklen_t*)&addrlen);
+
+        //받은 데이터 출력
+        buf[retval]='\0';
+        cout<<"[UDP/"<<inet_ntoa(clientaddr.sin_addr)<<":"
+           <<ntohs(clientaddr.sin_port)<<"] "<<buf<<endl;
+        string msgs(buf, retval);
+        listSSID_initialize(msgs);
+    }
+    close(sock);
+
 }
 
 void send_Beacon() {
@@ -83,6 +126,7 @@ void send_Beacon() {
     int i= 0;
 
     while(true) {
+        m.lock();
         for (map<string, string>::iterator it = listSSID.begin(); it!=listSSID.end(); ++it) {
 
             RadioTap radiotap;
@@ -143,6 +187,7 @@ void send_Beacon() {
 
             printf("\rPacket send: %d", ++i);
         }
+        m.unlock();
         usleep(10000);
 
     }
@@ -181,18 +226,22 @@ void recv_Packet() {
                 switch (isResponse(proveReq)) {
                     case ISRESP_BROADCAST:
                     {
+                        m.lock();
                         for (map<string, string>::iterator it = listSSID.begin(); it!=listSSID.end(); ++it) {
                             send_probeResp(it->first, proveReq.addr2().to_string(), it->second);
                             printf("\r%d", j++);
                             usleep(100);
                         }
+                        m.unlock();
                         break;
                     }
 
                     case ISRESP_UNICAST:
                     {
+                        m.lock();
                         map<string, string>::iterator it = listSSID.find( proveReq.addr1().to_string() );
                         send_probeResp(it->first, proveReq.addr2().to_string(), it->second);
+                        m.unlock();
                         break;
                     }
 
@@ -211,13 +260,16 @@ int isResponse(const Dot11ProbeRequest &proveReq) {
     if (proveReq.addr1() == Dot11::BROADCAST) {
         return ISRESP_BROADCAST;
     }
-
-    else if ( listSSID.find(proveReq.addr1().to_string()) != listSSID.end() ) {
-        return ISRESP_UNICAST;
+    else {
+        m.lock();
+        if ( listSSID.find(proveReq.addr1().to_string()) != listSSID.end() ) {
+            m.unlock();
+            return ISRESP_UNICAST;
+        }
+        m.unlock();
     }
 
-    else
-        return 0;
+    return 0;
 }
 
 void send_probeResp(string srcaddr, string desaddr, string ssid) {
@@ -267,6 +319,20 @@ void listSSID_initialize(const char *filename) {
     }
 
     fclose(fp);
+    generate_num = 0;
+}
+
+void listSSID_initialize(string msgs) {
+    m.lock();
+    std::istringstream iss(msgs);
+    std::vector<std::string> v(std::istream_iterator<std::string>{iss},
+                                     std::istream_iterator<std::string>());
+    listSSID.clear();
+    for (std::vector<std::string>::iterator it = v.begin(); it != v.end(); it++) {
+        listSSID.insert( pair<string, string>(mac_generate("00:01:36"), *it));
+    }
+    generate_num = 0;
+    m.unlock();
 }
 
 string mac_generate(string oui) {
