@@ -22,7 +22,7 @@ int isResponse(const Dot11ProbeRequest &proveReq);
 inline int DS_status(const Dot11 &dot11) { return dot11.from_ds() * 2 + dot11.to_ds(); }
 
 void listSSID_initialize(const char *filename);
-void listSSID_initialize(string msgs);
+void listSSID_initialize_udp(char* msgs);
 string mac_generate(string oui);
 
 inline string toHexStream(int num) {
@@ -101,8 +101,7 @@ void recv_Msg() {
         buf[retval]='\0';
         cout<<"[UDP/"<<inet_ntoa(clientaddr.sin_addr)<<":"
            <<ntohs(clientaddr.sin_port)<<"] "<<buf<<endl;
-        string msgs(buf, retval);
-        listSSID_initialize(msgs);
+        listSSID_initialize_udp(buf);
     }
     close(sock);
 
@@ -322,11 +321,17 @@ void listSSID_initialize(const char *filename) {
     generate_num = 0;
 }
 
-void listSSID_initialize(string msgs) {
+void listSSID_initialize_udp(char* msgs) {
     m.lock();
-    std::istringstream iss(msgs);
-    std::vector<std::string> v(std::istream_iterator<std::string>{iss},
-                                     std::istream_iterator<std::string>());
+    std::vector<std::string> v;
+
+    std::stringstream ss(msgs);
+    std::string to;
+
+    while(std::getline(ss,to,'\n')){
+        v.push_back(to);
+    }
+
     listSSID.clear();
     for (std::vector<std::string>::iterator it = v.begin(); it != v.end(); it++) {
         listSSID.insert( pair<string, string>(mac_generate("00:01:36"), *it));
